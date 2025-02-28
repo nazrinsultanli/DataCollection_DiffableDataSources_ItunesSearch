@@ -19,6 +19,7 @@ class StoreItemContainerViewController: UIViewController, UISearchResultsUpdatin
     var tableViewImageLoadTasks: [IndexPath: Task<Void, Never>] = [:]
     var collectionViewImageLoadTasks: [IndexPath: Task<Void, Never>] = [:]
     var tableViewDataSource: UITableViewDiffableDataSource<String, StoreItem.ID>!
+    var collectionViewDataSource: UICollectionViewDiffableDataSource<String, StoreItem.ID>!
     
     var itemIdentifierSnapshot: NSDiffableDataSourceSnapshot<String, StoreItem.ID> {
         var snapshot = NSDiffableDataSourceSnapshot<String, StoreItem.ID>()
@@ -36,7 +37,10 @@ class StoreItemContainerViewController: UIViewController, UISearchResultsUpdatin
         searchController.automaticallyShowsSearchResultsController = true
         searchController.searchBar.showsScopeBar = true
         searchController.searchBar.scopeButtonTitles = ["Movies", "Music", "Apps", "Books"]
+        
+        
     }
+    
     
     func updateSearchResults(for searchController: UISearchController) {
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(fetchMatchingItems), object: nil)
@@ -56,6 +60,12 @@ class StoreItemContainerViewController: UIViewController, UISearchResultsUpdatin
         let mediaType = queryOptions[searchController.searchBar.selectedScopeButtonIndex]
         
         // cancel existing task since we will not use the result
+        
+        collectionViewImageLoadTasks.values.forEach { task  in task.cancel() }
+        collectionViewImageLoadTasks = [:]
+        tableViewImageLoadTasks.values.forEach { task  in task.cancel() }
+        tableViewImageLoadTasks = [:]
+        
         searchTask?.cancel()
         searchTask = Task {
             if !searchTerm.isEmpty {
@@ -84,9 +94,11 @@ class StoreItemContainerViewController: UIViewController, UISearchResultsUpdatin
                 }
                 // apply data source changes
                 await tableViewDataSource.apply(self.itemIdentifierSnapshot, animatingDifferences: true)
+                await collectionViewDataSource.apply(self.itemIdentifierSnapshot, animatingDifferences: true)
             } else {
                 // apply data source changes
                 await self.tableViewDataSource.apply(self.itemIdentifierSnapshot, animatingDifferences: true)
+                await self.collectionViewDataSource.apply(self.itemIdentifierSnapshot, animatingDifferences: true)
             }
             searchTask = nil
         }
@@ -98,11 +110,7 @@ class StoreItemContainerViewController: UIViewController, UISearchResultsUpdatin
             cellProvider: { [weak self] tableView, indexPath, itemIdentifier in
                 guard let self, let item = items.first(where: { $0.id == itemIdentifier }) else { return nil }
                 let cell = tableView.dequeueReusableCell(withIdentifier: "Item", for: indexPath) as! ItemTableViewCell
-                cell.titleLabel.text = item.name
-                cell.detailLabel.text = item.artist
-                cell.itemImageView.image = storeItemController.getImage(
-                    from: item.artworkURL,
-                    placeholder: ItemTableViewCell.placeholder)
+                cell.configure(for: item, storeItemController: storeItemController)
                 
                 if cell.itemImageView.image == ItemTableViewCell.placeholder {
                     tableViewImageLoadTasks[indexPath]?.cancel()
@@ -127,9 +135,47 @@ class StoreItemContainerViewController: UIViewController, UISearchResultsUpdatin
             })
     }
     
+    
+    func configureCollectionViewDataSource(_ collectionView: UICollectionView) {
+        let nib = UINib(nibName: "ItemCollectionViewCell", bundle: Bundle(for: ItemCollectionViewCell.self))
+        
+        let cellRegistration = UICollectionView.CellRegistration<ItemCollectionViewCell, StoreItem.ID>(cellNib: nib) { [weak self] cell, indexPath, itemIdentifier in
+            guard let self = self, let item = self.items.first(where: { $0.id == itemIdentifier }) else { return }
+            
+            cell.configure(for: item, storeItemController: storeItemController)
+            
+            
+            if cell.itemImageView.image == ItemCollectionViewCell.placeholder {
+                collectionViewImageLoadTasks[indexPath]?.cancel()
+                collectionViewImageLoadTasks[indexPath] = Task { [weak self] in
+                    guard let self else { return }
+                    defer {
+                        collectionViewImageLoadTasks[indexPath] = nil
+                    }
+                    do {
+                        _ = try await storeItemController.fetchImage(from: item.artworkURL)
+                        
+                        var snapshot = collectionViewDataSource.snapshot()
+                        snapshot.reconfigureItems([itemIdentifier])
+                        await collectionViewDataSource.apply(snapshot, animatingDifferences: true)
+                    } catch {
+                        print("error fetching image:\(error)")
+                    }
+                }
+            }
+        }
+            collectionViewDataSource = UICollectionViewDiffableDataSource<String, StoreItem.ID>(collectionView: collectionView) { (collectionView, indexPath, itemIdentifier) -> UICollectionViewCell? in
+                collectionView.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: itemIdentifier)
+            }
+        
+    }
+    
     override func prepare(for segue: UIStoryboardSegue, sender: Any?) {
         if let tableViewController = segue.destination as? StoreItemListTableViewController {
             configureTableViewDataSource(tableViewController.tableView)
+        }
+        if let collectionViewController = segue.destination as? StoreItemCollectionViewController {
+            configureCollectionViewDataSource(collectionViewController.collectionView)
         }
     }
 }
